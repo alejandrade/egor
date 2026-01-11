@@ -139,7 +139,10 @@ fn main() {
         .on_quit(|| {
             println!("Quitting already? Don't be a sore loser");
         })
-        .run(move |gfx, input, timer, ui| {
+        .run(move |egor, timer, ui| {
+            let gfx = &mut egor.gfx;
+            let input = egor.input;
+
             if timer.frame == 0 {
                 state.map.load_tileset(
                     gfx,

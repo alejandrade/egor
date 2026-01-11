@@ -1,32 +1,47 @@
+pub mod coordinate_converter;
+pub mod egor_event;
 pub mod input;
 pub mod time;
 
 use std::sync::Arc;
 
+pub use coordinate_converter::CanvasInfo;
+pub use egor_event::EgorEvent;
 pub use winit::{event::WindowEvent, window::Window};
 
+use crate::{input::Input, time::FrameTimer};
 use winit::{
     application::ApplicationHandler,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    window::WindowId,
+    window::{Fullscreen, WindowId},
 };
 
-use crate::{input::Input, time::FrameTimer};
+pub type PositionFn = Box<dyn FnOnce(u32, u32) -> (i32, i32)>;
 
 pub struct AppConfig {
     pub title: String,
-    pub width: u32,
-    pub height: u32,
-    pub resizable: bool,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub resizable: Option<bool>,
+    pub fullscreen: Option<bool>,
+    pub maximized: Option<bool>,
+    pub position: Option<PositionFn>,
+    pub max_surface_width: Option<u32>,
+    pub max_surface_height: Option<u32>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             title: "Egor App".to_string(),
-            width: 800,
-            height: 600,
-            resizable: true,
+            width: None,
+            height: None,
+            resizable: None,
+            fullscreen: None,
+            maximized: None,
+            position: None,
+            max_surface_width: None,
+            max_surface_height: None,
         }
     }
 }
@@ -44,7 +59,15 @@ pub trait AppHandler<R> {
     /// Called after the resource is initialized & window is ready
     fn on_ready(&mut self, _window: &Window, _resource: &mut R) {}
     /// Called every frame
-    fn frame(&mut self, _window: &Window, _resource: &mut R, _input: &Input, _timer: &FrameTimer) {}
+    fn frame(
+        &mut self,
+        _window: &Window,
+        _resource: &mut R,
+        _input: &mut Input,
+        _timer: &FrameTimer,
+        _events: &[EgorEvent],
+    ) {
+    }
     /// Called on window resize
     fn resize(&mut self, _w: u32, _h: u32, _resource: &mut R) {}
     /// Called when the window is requested to close
@@ -64,6 +87,8 @@ pub struct AppRunner<R: 'static, H: AppHandler<R> + 'static> {
     input: Input,
     timer: FrameTimer,
     config: AppConfig,
+    events: Vec<EgorEvent>,
+    close_pending: bool,
 }
 
 #[doc(hidden)]
@@ -72,13 +97,47 @@ impl<R, H: AppHandler<R> + 'static> ApplicationHandler<(R, H)> for AppRunner<R, 
         // Called when window is ready; initializes the resource async (wasm) or sync (native)
         if let Some(proxy) = self.proxy.take() {
             let win_attrs = {
-                use winit::dpi::PhysicalSize;
+                use winit::dpi::{PhysicalPosition, PhysicalSize};
 
                 #[allow(unused_mut)]
-                let mut attrs = Window::default_attributes()
-                    .with_title(&self.config.title)
-                    .with_inner_size(PhysicalSize::new(self.config.width, self.config.height))
-                    .with_resizable(self.config.resizable);
+                let mut attrs = Window::default_attributes().with_title(&self.config.title);
+                attrs = attrs.with_inner_size(PhysicalSize::new(
+                    self.config.width.unwrap_or(800),
+                    self.config.height.unwrap_or(600),
+                ));
+
+                if let Some(resizable) = self.config.resizable {
+                    attrs = attrs.with_resizable(resizable);
+                }
+
+                // Translate fullscreen boolean to winit Fullscreen (exclusive/bordered mode)
+                if let Some(true) = self.config.fullscreen {
+                    // Bordered fullscreen uses exclusive mode - get the first available video mode
+                    if let Some(monitor) = event_loop.primary_monitor()
+                        && let Some(vm) = monitor.video_modes().next()
+                    {
+                        attrs = attrs.with_fullscreen(Some(Fullscreen::Exclusive(vm)));
+                    }
+                }
+
+                if let Some(maximized) = self.config.maximized {
+                    attrs = attrs.with_maximized(maximized);
+                }
+
+                // Set window position using closure
+                if let Some(position_fn) = self.config.position.take()
+                    && let Some(monitor) = event_loop.primary_monitor()
+                {
+                    let monitor_size = monitor.size();
+                    let monitor_position = monitor.position();
+                    // Position function receives monitor size, but we need to add monitor offset
+                    // since PhysicalPosition is relative to the desktop, not the monitor
+                    let (relative_x, relative_y) =
+                        position_fn(monitor_size.width, monitor_size.height);
+                    let x = monitor_position.x + relative_x;
+                    let y = monitor_position.y + relative_y;
+                    attrs = attrs.with_position(PhysicalPosition::new(x, y));
+                }
 
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -114,10 +173,8 @@ impl<R, H: AppHandler<R> + 'static> ApplicationHandler<(R, H)> for AppRunner<R, 
 
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(handler) = &mut self.handler {
-                    handler.on_quit();
-                }
-                event_loop.exit();
+                self.events.push(EgorEvent::CloseRequested);
+                self.close_pending = true;
             }
             WindowEvent::RedrawRequested => {
                 if let (Some(w), Some(r), Some(handler)) = (
@@ -125,22 +182,43 @@ impl<R, H: AppHandler<R> + 'static> ApplicationHandler<(R, H)> for AppRunner<R, 
                     self.resource.as_mut(),
                     self.handler.as_mut(),
                 ) {
-                    handler.frame(w, r, &self.input, &self.timer);
+                    handler.frame(w, r, &mut self.input, &self.timer, &self.events);
+                    self.events.clear();
                     self.timer.update();
                     self.input.end_frame();
                 }
+
+                // Check if close was requested - exit after giving user one final frame
+                if self.close_pending {
+                    if let Some(handler) = &mut self.handler {
+                        handler.on_quit();
+                    }
+                    event_loop.exit();
+                    return;
+                }
+
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
             }
             WindowEvent::Resized(size) => {
-                if let (Some(r), Some(handler)) = (self.resource.as_mut(), self.handler.as_mut()) {
+                self.events
+                    .push(EgorEvent::Resized(size.width, size.height));
+                if let (Some(r), Some(handler)) = (self.resource.as_mut(), self.handler.as_mut())
+                    && size.width > 0
+                    && size.height > 0
+                {
                     handler.resize(size.width, size.height, r);
                 }
+            }
+            WindowEvent::Focused(focused) => {
+                self.events.push(EgorEvent::Focused(focused));
             }
             WindowEvent::KeyboardInput { event, .. } => self.input.keyboard(event),
             WindowEvent::MouseInput { button, state, .. } => self.input.mouse(button, state),
             WindowEvent::CursorMoved { position, .. } => self.input.cursor(position),
+            WindowEvent::Touch(touch) => self.input.touch(touch),
+
             _ => {}
         }
     }
@@ -150,6 +228,12 @@ impl<R, H: AppHandler<R> + 'static> ApplicationHandler<(R, H)> for AppRunner<R, 
         self.handler = Some(handler);
 
         if let (Some(r), Some(h), Some(w)) = (&mut self.resource, &mut self.handler, &self.window) {
+            // SAFETY CHECK: Ensure we aren't starting with a zero-size surface
+            let size = w.inner_size();
+            if size.width > 0 && size.height > 0 {
+                h.resize(size.width, size.height, r);
+            }
+
             h.on_ready(w, r);
         }
     }
@@ -166,6 +250,8 @@ impl<R, H: AppHandler<R> + 'static> AppRunner<R, H> {
             input: Input::default(),
             timer: FrameTimer::default(),
             config,
+            events: Vec::new(),
+            close_pending: false,
         }
     }
 

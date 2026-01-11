@@ -1,5 +1,6 @@
 pub mod math;
 pub mod pipeline;
+pub mod render_utils;
 pub mod texture;
 pub mod vertex;
 
@@ -75,6 +76,8 @@ pub struct Renderer {
     textures: Vec<Texture>,
     default_texture: Texture,
     clear_color: Color,
+    max_surface_width: Option<u32>,
+    max_surface_height: Option<u32>,
 }
 
 impl Renderer {
@@ -82,6 +85,12 @@ impl Renderer {
     ///
     /// Initializes `wgpu`, sets up a basic alpha-blended render pipeline, default texture,
     /// camera uniform, internal text renderer & more
+    ///
+    /// # Arguments
+    ///
+    /// * `inner_width` - Actual window width (may be 0 during initialization)
+    /// * `inner_height` - Actual window height (may be 0 during initialization)
+    /// * `window` - Window handle for surface creation
     pub async fn new(
         inner_width: u32,
         inner_height: u32,
@@ -115,7 +124,6 @@ impl Renderer {
             .unwrap();
         surface_cfg.present_mode = PresentMode::AutoVsync;
         surface.configure(&device, &surface_cfg);
-
         let camera_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&[CameraUniform {
@@ -151,6 +159,8 @@ impl Renderer {
             textures: Vec::new(),
             default_texture,
             clear_color: Color::BLACK,
+            max_surface_width: None,
+            max_surface_height: None,
         }
     }
 
@@ -177,7 +187,21 @@ impl Renderer {
             Err(SurfaceError::OutOfMemory) => {
                 panic!("Out of GPU memory!");
             }
-            Err(_) => return None,
+            Err(SurfaceError::Outdated) => {
+                // Surface configuration is outdated, reconfigure and skip this frame
+                // The resize handler should update the config on the next resize event
+                return None;
+            }
+            Err(e) => {
+                // If the surface is lost, we must reconfigure it
+                if let SurfaceError::Lost = e {
+                    self.target
+                        .surface
+                        .configure(&self.gpu.device, &self.target.config);
+                }
+
+                return None;
+            }
         };
 
         let view = surface_texture.texture.create_view(&Default::default());
@@ -253,9 +277,33 @@ impl Renderer {
         })
     }
 
+    /// Set the maximum surface size for rendering
+    ///
+    /// This sets an upper limit on the rendering surface dimensions.
+    /// The actual limit used will be the minimum of this value and the hardware/API limit.
+    pub fn set_max_surface_size(&mut self, width: Option<u32>, height: Option<u32>) {
+        self.max_surface_width = width;
+        self.max_surface_height = height;
+    }
+
     /// Resizes the surface & updates internal render targets
     pub fn resize(&mut self, w: u32, h: u32) {
-        (self.target.config.width, self.target.config.height) = (w, h);
+        // Skip resize if dimensions are zero (window not ready yet)
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let hw_max = render_utils::query_max_texture_size();
+        let (final_width, final_height) = render_utils::clamp_dimensions(
+            w,
+            h,
+            self.max_surface_width,
+            self.max_surface_height,
+            hw_max,
+        );
+
+        // clamp_dimensions guarantees non-zero result, so no need to check here
+        (self.target.config.width, self.target.config.height) = (final_width, final_height);
         self.target
             .surface
             .configure(&self.gpu.device, &self.target.config);
@@ -267,6 +315,23 @@ impl Renderer {
             self.target.config.width as f32,
             self.target.config.height as f32,
         )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn get_canvas_info(&self) -> egor_app::CanvasInfo {
+        use wasm_bindgen::JsCast;
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let canvas = document.query_selector("canvas").unwrap().unwrap();
+        let canvas: web_sys::HtmlCanvasElement = canvas.dyn_into().unwrap();
+        let rect = canvas.get_bounding_client_rect();
+
+        egor_app::CanvasInfo {
+            css_width: rect.width() as f32,
+            css_height: rect.height() as f32,
+            buffer_width: self.target.config.width as f32,
+            buffer_height: self.target.config.height as f32,
+        }
     }
 
     /// Enables/disables V‑Sync by changing the surface present mode

@@ -23,11 +23,13 @@
 //!
 //! ## Minimal Example: Draw a Rectangle
 //! ```no_run
-//! use egor::{app::App, render::Graphics};
-//! App::new().run(|gfx: &mut Graphics, _input, _timer| {
+//! # #[cfg(not(feature = "ui"))]
+//! use egor::{app::App, egor::Egor};
+//! # #[cfg(not(feature = "ui"))]
+//! App::new().run(|egor: &mut Egor, _timer| {
 //!     // start building a rectangle with some defaults
 //!     // draws automatically on `Drop` without an explicit `build()`
-//!     gfx.rect();
+//!     egor.gfx.rect();
 //! });
 //! ```
 //!
@@ -53,9 +55,14 @@
 //! - Optional backends can be enabled to override defaults or for cross-platform targeting
 
 pub mod app {
+    pub use egor_app::EgorEvent;
     pub use egor_glue::app::App;
     #[cfg(feature = "ui")]
     pub use egor_glue::ui::egui;
+}
+
+pub mod egor {
+    pub use egor_glue::egor::Egor;
 }
 
 pub mod input {

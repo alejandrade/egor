@@ -2,6 +2,7 @@ pub use winit::{event::MouseButton, keyboard::KeyCode};
 
 use std::collections::HashMap;
 
+use crate::coordinate_converter::CoordinateConverter;
 use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, KeyEvent},
@@ -14,6 +15,10 @@ pub struct Input {
     mouse_buttons: HashMap<MouseButton, (ElementState, ElementState)>,
     mouse_position: (f32, f32),
     mouse_delta: (f32, f32),
+    touches: HashMap<u64, (f32, f32)>, // Track active touches by id -> (x, y)
+    touch_start_positions: HashMap<u64, (f32, f32)>, // Track where each touch started
+    is_touch_capable: bool,
+    coordinate_converter: CoordinateConverter,
 }
 
 impl Input {
@@ -40,7 +45,15 @@ impl Input {
     /// Update cursor position & compute delta
     pub(crate) fn cursor(&mut self, position: PhysicalPosition<f64>) {
         let prev_pos = self.mouse_position;
-        let pos: (f32, f32) = position.into();
+
+        // Get raw window coordinates from winit
+        let (window_x, window_y): (f32, f32) = position.into();
+
+        // Convert to buffer coordinates using the coordinate converter
+        let pos = self
+            .coordinate_converter
+            .window_to_buffer(window_x, window_y);
+
         self.mouse_delta = (pos.0 - prev_pos.0, pos.1 - prev_pos.1);
         self.mouse_position = pos;
     }
@@ -143,6 +156,105 @@ impl Input {
     /// Delta mouse movement since last frame
     pub fn mouse_delta(&self) -> (f32, f32) {
         self.mouse_delta
+    }
+
+    pub(crate) fn touch(&mut self, touch: winit::event::Touch) {
+        use winit::event::TouchPhase;
+
+        // Mark that this device has touch capability
+        self.is_touch_capable = true;
+
+        // Get raw window coordinates from winit
+        let (window_x, window_y) = (touch.location.x as f32, touch.location.y as f32);
+
+        // Convert to buffer coordinates using the coordinate converter
+        let (x, y) = self
+            .coordinate_converter
+            .window_to_buffer(window_x, window_y);
+
+        match touch.phase {
+            TouchPhase::Started => {
+                // Store touch start position for swipe detection (now in buffer coordinates)
+                self.touch_start_positions.insert(touch.id, (x, y));
+                self.touches.insert(touch.id, (x, y));
+
+                // Convert touch start to mouse press for compatibility
+                let prev_pos = self.mouse_position;
+                self.mouse_position = (x, y);
+                self.mouse_delta = (x - prev_pos.0, y - prev_pos.1);
+
+                // Simulate mouse button press (new press this frame)
+                let prev = self
+                    .mouse_buttons
+                    .get(&MouseButton::Left)
+                    .map_or(ElementState::Released, |(curr, _)| *curr);
+                self.mouse_buttons
+                    .insert(MouseButton::Left, (ElementState::Pressed, prev));
+            }
+            TouchPhase::Moved => {
+                // Update touch position (now in buffer coordinates)
+                if self.touches.contains_key(&touch.id) {
+                    let prev_pos = self.mouse_position;
+                    self.mouse_position = (x, y);
+                    self.mouse_delta = (x - prev_pos.0, y - prev_pos.1);
+                    self.touches.insert(touch.id, (x, y));
+
+                    // Keep mouse button pressed during move (update current state, keep previous)
+                    if let Some((curr, prev)) = self.mouse_buttons.get_mut(&MouseButton::Left) {
+                        *prev = *curr;
+                        *curr = ElementState::Pressed;
+                    } else {
+                        // If somehow not tracked, add it
+                        self.mouse_buttons.insert(
+                            MouseButton::Left,
+                            (ElementState::Pressed, ElementState::Released),
+                        );
+                    }
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                // Check if this was a swipe (movement > threshold)
+                if let Some(_start_pos) = self.touch_start_positions.remove(&touch.id) {
+                    // If moved more than threshold, it's a swipe
+                    // You can add swipe detection logic here if needed
+                    // For now, we just convert to mouse release
+                }
+
+                self.touches.remove(&touch.id);
+
+                // Simulate mouse button release
+                let prev = self
+                    .mouse_buttons
+                    .get(&MouseButton::Left)
+                    .map_or(ElementState::Released, |(curr, _)| *curr);
+                self.mouse_buttons
+                    .insert(MouseButton::Left, (ElementState::Released, prev));
+            }
+        }
+    }
+
+    /// Get the number of active touches
+    pub fn touch_count(&self) -> usize {
+        self.touches.len()
+    }
+
+    /// Get primary touch position (first active touch, or mouse position if no touches)
+    pub fn primary_touch_position(&self) -> (f32, f32) {
+        self.touches
+            .values()
+            .next()
+            .copied()
+            .unwrap_or(self.mouse_position)
+    }
+
+    pub fn is_touch_capable(&self) -> bool {
+        self.is_touch_capable
+    }
+
+    pub fn update_coordinate_converter(&mut self, converter: CoordinateConverter) {
+        if self.coordinate_converter != converter {
+            self.coordinate_converter = converter;
+        }
     }
 }
 

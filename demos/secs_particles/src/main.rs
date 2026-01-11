@@ -35,14 +35,13 @@ fn main() {
 
     App::new()
         .title("Egor ECS Particles Demo")
-        .run(move |gfx, _, frame| {
-            let screen_size = gfx.screen_size();
-
+        .run(move |egor, frame| {
+            let screen_size = egor.gfx.screen_size();
+            egor.gfx.clear(Color::BLACK);
             world.query(|_, pos: &mut Position, vel: &Velocity| {
                 pos.vec += vel.vec * speed * frame.delta;
                 wraparound(&mut pos.vec, screen_size);
-
-                gfx.rect()
+                egor.gfx.rect()
                     .at(pos.vec)
                     .size(Vec2::splat(10.0))
                     .color(Color::WHITE);

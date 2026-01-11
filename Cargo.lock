@@ -707,6 +707,7 @@ name = "egor_glue"
 version = "0.6.1"
 dependencies = [
  "color",
+ "console_log",
  "dioxus-devtools",
  "egor_app",
  "egor_render",
@@ -714,6 +715,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "glyphon",
+ "web-sys",
 ]
 
 [[package]]
@@ -721,8 +723,11 @@ name = "egor_render"
 version = "0.6.1"
 dependencies = [
  "bytemuck",
+ "egor_app",
  "glam",
  "image",
+ "wasm-bindgen",
+ "web-sys",
  "wgpu",
 ]
 
